@@ -3,13 +3,16 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+import requests as http_requests
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 import database as db
 import seed
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 
 app = FastAPI(title="Arogya API", version="1.0.0",
               description="Longitudinal population health management for chronic & cancer care")
@@ -24,6 +27,99 @@ app.add_middleware(
 seed.seed_if_empty()
 os.makedirs(db.UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=db.UPLOAD_DIR), name="uploads")
+
+
+# ---------------------------------------------------------------- auth (Google Sign-In)
+AUTH_EXEMPT = ("/api/auth/", "/api/health", "/docs", "/openapi.json", "/redoc")
+
+
+@app.middleware("http")
+async def auth_guard(request: Request, call_next):
+    """Require a valid session token on all /api routes (when Google auth is configured)."""
+    path = request.url.path
+    if (GOOGLE_CLIENT_ID and path.startswith("/api")
+            and not any(path.startswith(x) for x in AUTH_EXEMPT)
+            and request.method != "OPTIONS"):
+        token = (request.headers.get("authorization") or "").removeprefix("Bearer ").strip()
+        sessions = db.load()["sessions"]
+        if not token or not any(s["token"] == token for s in sessions):
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    return await call_next(request)
+
+
+@app.post("/api/auth/google")
+def auth_google(payload: dict):
+    """Sign in / sign up with a Google Identity Services credential (ID token)."""
+    credential = (payload.get("credential") or "").strip()
+    if not credential:
+        raise HTTPException(400, "Missing Google credential")
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(500, "GOOGLE_CLIENT_ID not configured on server")
+    try:
+        resp = http_requests.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": credential}, timeout=10)
+    except Exception as e:
+        raise HTTPException(502, f"Could not verify token with Google: {e}")
+    if resp.status_code != 200:
+        raise HTTPException(401, "Invalid Google credential")
+    info = resp.json()
+    if info.get("aud") != GOOGLE_CLIENT_ID:
+        raise HTTPException(401, "Credential was issued for a different app")
+
+    data = db.load()
+    user = next((u for u in data["users"] if u["google_sub"] == info["sub"]), None)
+    if user is None:
+        user = {
+            "id": db.uid("US"),
+            "google_sub": info["sub"],
+            "email": info.get("email", ""),
+            "name": info.get("name", info.get("email", "User")),
+            "picture": info.get("picture", ""),
+            "created_at": datetime.now().isoformat(),
+        }
+        data["users"].append(user)
+    else:  # refresh profile on sign-in
+        user["name"] = info.get("name", user["name"])
+        user["picture"] = info.get("picture", user["picture"])
+
+    token = db.uid("TK") + db.uid()
+    data["sessions"].append({
+        "token": token, "user_id": user["id"],
+        "created_at": datetime.now().isoformat(),
+    })
+    # keep only the 50 newest sessions
+    data["sessions"] = data["sessions"][-50:]
+    db.save()
+    return {"token": token, "user": {k: user[k] for k in ("id", "email", "name", "picture")}}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    token = (request.headers.get("authorization") or "").removeprefix("Bearer ").strip()
+    data = db.load()
+    sess = next((s for s in data["sessions"] if s["token"] == token), None)
+    if not sess:
+        raise HTTPException(401, "Not authenticated")
+    user = next((u for u in data["users"] if u["id"] == sess["user_id"]), None)
+    if not user:
+        raise HTTPException(401, "User not found")
+    return {k: user[k] for k in ("id", "email", "name", "picture")}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request):
+    token = (request.headers.get("authorization") or "").removeprefix("Bearer ").strip()
+    data = db.load()
+    data["sessions"] = [s for s in data["sessions"] if s["token"] != token]
+    db.save()
+    return {"ok": True}
+
+
+@app.get("/api/auth/config")
+def auth_config():
+    return {"google_client_id": GOOGLE_CLIENT_ID, "auth_enabled": bool(GOOGLE_CLIENT_ID),
+            "storage": db.backend_name()}
 
 JOURNEY_STAGES = ["SCREENING", "CONSULTATION", "INVESTIGATION", "BIOPSY",
                   "PATHOLOGY REPORT", "REFERRAL", "SPECIALIST VISIT", "FOLLOW-UP"]
