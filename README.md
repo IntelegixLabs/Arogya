@@ -1,6 +1,16 @@
 # Arogya Backend (FastAPI)
 
-Population health management API — longitudinal patient journeys for cancer, diabetes and maternal health.
+Population health management API - longitudinal patient journeys for cancer, diabetes and maternal health.
+
+Includes the **Prediction Lab**: three ML models (Gradient Boosting) trained at startup on real public clinical datasets committed under `datasets/`:
+
+| Model | Dataset | Source |
+|---|---|---|
+| Breast cancer | Breast Cancer Wisconsin (Diagnostic) | UCI / scikit-learn (Kaggle classic) |
+| Lung cancer | Lung Cancer Survey | Hugging Face `nateraw/lung-cancer` |
+| Cervical cancer | Risk Factors for Cervical Cancer | UCI ML Repository |
+
+Storage: PostgreSQL (database `ArogyaDB`, auto-created) with automatic local JSON fallback. Auth: Google Sign-In (see `.env.example`). Full project overview in the [root README](../README.md).
 
 ## Run locally
 
@@ -20,7 +30,7 @@ gcloud run deploy arogya-api \
   --allow-unauthenticated
 ```
 
-Container listens on `$PORT` (8080). Note: JSON-file storage is ephemeral on Cloud Run —
+Container listens on `$PORT` (8080). Note: JSON-file storage is ephemeral on Cloud Run -
 mount a GCS/volume or swap to Cloud SQL/Firestore for production persistence.
 
 ## Key endpoints

@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 import database as db
+import ml
 import seed
 
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
@@ -27,6 +28,10 @@ app.add_middleware(
 seed.seed_if_empty()
 os.makedirs(db.UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=db.UPLOAD_DIR), name="uploads")
+
+# warm up ML models in the background so the first Prediction Lab call is instant
+import threading as _threading
+_threading.Thread(target=ml.ensure_ready, daemon=True).start()
 
 
 # ---------------------------------------------------------------- auth (Google Sign-In)
@@ -646,6 +651,22 @@ def ai_assistant(payload: dict):
     return reply("I can help with: 'show care gaps', 'overdue follow-ups', 'high risk patients', "
                  "'pending pathology reports', 'incomplete referrals', 'population summary', "
                  "or ask about a patient by name.")
+
+
+# ---------------------------------------------------------------- prediction lab (real ML models)
+@app.get("/api/ml/models")
+def ml_models():
+    return ml.list_models()
+
+
+@app.post("/api/ml/predict")
+def ml_predict(payload: dict):
+    model_id = payload.get("model", "")
+    features = payload.get("features", {}) or {}
+    try:
+        return ml.predict(model_id, features)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
 @app.get("/api/health")
